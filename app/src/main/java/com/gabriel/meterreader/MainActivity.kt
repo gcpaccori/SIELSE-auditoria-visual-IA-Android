@@ -60,6 +60,16 @@ class MainActivity : AppCompatActivity() {
     private var previewFrameHeight: Int = 1
     private var finalReading: String? = null
 
+    // --- Mode: live vs photo ---
+    private var isPhotoMode = false
+    private val captureNextFrame = AtomicBoolean(false)
+
+    companion object {
+        private const val TAG = "MainActivity"
+        /** Display panels are typically 3.5× wider than tall. */
+        private const val DISPLAY_ASPECT_RATIO = 3.5f
+    }
+
     private val cameraPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
@@ -179,9 +189,19 @@ class MainActivity : AppCompatActivity() {
             }
 
             val now = SystemClock.elapsedRealtime()
-            if (now - lastPatrolInferenceAt < patrolIntervalMs) {
-                imageProxy.close()
-                return
+
+            if (isPhotoMode) {
+                // In photo mode only process the frame the user explicitly triggered.
+                if (!captureNextFrame.compareAndSet(true, false)) {
+                    imageProxy.close()
+                    return
+                }
+            } else {
+                // In live mode throttle to ~2 FPS.
+                if (now - lastPatrolInferenceAt < patrolIntervalMs) {
+                    imageProxy.close()
+                    return
+                }
             }
 
             if (!isProcessing.compareAndSet(false, true)) {
@@ -189,7 +209,8 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            lastPatrolInferenceAt = now
+            if (!isPhotoMode) lastPatrolInferenceAt = now
+
             val rawBitmap = imageProxy.toBitmap()
             val rotationDegrees = imageProxy.imageInfo.rotationDegrees
             imageProxy.close()
@@ -219,7 +240,15 @@ class MainActivity : AppCompatActivity() {
                 .map { remapFromLetterbox(it, displayInput, bitmap.width, bitmap.height) }
                 .sortedByDescending { it.conf }
 
-            val display = displayDetections.firstOrNull()
+            val rawDisplay = displayDetections.firstOrNull()
+            Log.d(TAG, "analyzeImage: display=${rawDisplay?.let { "conf=${it.conf} box=${it.box}" } ?: "none"}")
+
+            // Enforce the 3.5:1 (width:height) aspect ratio typical for meter displays
+            // before drawing the overlay and before cropping for digit recognition.
+            val display = rawDisplay?.let { det ->
+                val adjusted = enforceDisplayAspectRatio(det.box, bitmap.width, bitmap.height)
+                det.copy(box = adjusted, xCenter = adjusted.centerX(), yCenter = adjusted.centerY())
+            }
 
             when {
                 display == null -> {
@@ -230,9 +259,24 @@ class MainActivity : AppCompatActivity() {
                         updateUi(
                             state = ReaderState.PATROL,
                             reading = null,
-                            message = "Buscando display..."
+                            message = if (isPhotoMode) "No se detectó display. Presiona Capturar de nuevo." else "Buscando display..."
                         )
+                        if (isPhotoMode) showCaptureButton(true)
                     }
+                    isProcessing.set(false)
+                }
+
+                isPhotoMode -> {
+                    // Photo mode: run digit recognition immediately without stabilisation.
+                    runOnUiThread {
+                        updateUi(
+                            state = ReaderState.PROCESSING,
+                            reading = null,
+                            message = "Display detectado. Reconociendo dígitos..."
+                        )
+                        binding.overlayView.update(display.box, emptyList(), previewFrameWidth, previewFrameHeight)
+                    }
+                    processFinalReading(bitmap, display.box)
                     isProcessing.set(false)
                 }
 
@@ -262,7 +306,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         } catch (e: Exception) {
-            Log.e("MainActivity", "analyzeImage error", e)
+            Log.e(TAG, "analyzeImage error", e)
             imageProxy.closeSafely()
             isProcessing.set(false)
             runOnUiThread {
@@ -281,6 +325,8 @@ class MainActivity : AppCompatActivity() {
             val digitModel = digitDetector ?: return
 
             val cropBounds = clampRectToBitmap(displayBox, frameBitmap.width, frameBitmap.height)
+            Log.d(TAG, "processFinalReading: crop=$cropBounds (${cropBounds.width()}×${cropBounds.height()})")
+
             val crop = Bitmap.createBitmap(
                 frameBitmap,
                 cropBounds.left,
@@ -299,6 +345,8 @@ class MainActivity : AppCompatActivity() {
                 cropBounds = cropBounds,
                 digitModel = digitModel
             )
+
+            Log.d(TAG, "processFinalReading: candidate=${candidate?.reading} digits=${candidate?.count}")
 
             val reading = candidate?.reading?.takeIf { it.isNotBlank() } ?: "ilegible"
             val overlayDigits = candidate?.fullFrameDetections ?: emptyList()
@@ -320,7 +368,7 @@ class MainActivity : AppCompatActivity() {
                 showDecisionButtons(true)
             }
         } catch (e: Exception) {
-            Log.e("MainActivity", "processFinalReading error", e)
+            Log.e(TAG, "processFinalReading error", e)
             currentState = ReaderState.ERROR
             runOnUiThread {
                 updateUi(
@@ -333,47 +381,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Letterbox the crop to 320×320 (the model's expected input size), run the digit
+     * model, and remap detected boxes back to full-frame coordinates.
+     *
+     * Previously the code resized the crop to arbitrary dimensions (e.g. 400×150) which
+     * caused the ONNX model—whose input tensor is fixed at [1,3,320,320]—to either throw
+     * a shape-mismatch error or return empty detections.  Using letterboxToSquare ensures
+     * the model always receives the correct input shape while preserving the crop's aspect
+     * ratio (the horizontal bar-shaped display area is centred in the 320×320 canvas).
+     */
     private fun buildBestCandidate(
         crop: Bitmap,
         cropBounds: Rect,
         digitModel: OnnxYoloDetector
     ): CandidateResult? {
-        val ratio = crop.width.toFloat() / crop.height.toFloat()
-
-        return when {
-            ratio < 0.85f -> {
-                val leftRotated = BitmapUtils.rotate90Ccw(crop)
-                val leftProcessed = BitmapUtils.resize(leftRotated, 400, 150)
-                val leftResult = evaluateVariant(leftProcessed, digitModel) { box ->
-                    mapProcessedVerticalLeftBoxToFullFrame(box, crop.width, crop.height, cropBounds)
-                }
-
-                val rightRotated = BitmapUtils.rotate90Cw(crop)
-                val rightProcessed = BitmapUtils.resize(rightRotated, 400, 150)
-                val rightResult = evaluateVariant(rightProcessed, digitModel) { box ->
-                    mapProcessedVerticalRightBoxToFullFrame(box, crop.width, crop.height, cropBounds)
-                }
-
-                listOfNotNull(leftResult, rightResult)
-                    .maxByOrNull { (it.count * 10f) + it.avgConfidence }
-            }
-
-            ratio <= 1.3f -> {
-                val targetW = 350
-                val scale = targetW / crop.width.toFloat()
-                val targetH = (crop.height * scale).toInt().coerceAtLeast(1)
-                val processed = BitmapUtils.resize(crop, targetW, targetH)
-                evaluateVariant(processed, digitModel) { box ->
-                    mapProcessedSquareBoxToFullFrame(box, scale, cropBounds)
-                }
-            }
-
-            else -> {
-                val processed = BitmapUtils.resize(crop, 400, 150)
-                evaluateVariant(processed, digitModel) { box ->
-                    mapProcessedHorizontalBoxToFullFrame(box, crop.width, crop.height, cropBounds)
-                }
-            }
+        Log.d(TAG, "buildBestCandidate: crop ${crop.width}×${crop.height}, running digit model")
+        val lb = BitmapUtils.letterboxToSquare(crop, 320)
+        return evaluateVariant(lb.bitmap, digitModel) { box ->
+            // Invert the letterbox transform to map from 320×320 space back to crop space,
+            // then shift by the crop origin to get full-frame coordinates.
+            fun unmap(v: Float, offset: Float, max: Float) = ((v - offset) / lb.scale).coerceIn(0f, max)
+            RectF(
+                unmap(box.left,   lb.dx, crop.width.toFloat())  + cropBounds.left,
+                unmap(box.top,    lb.dy, crop.height.toFloat()) + cropBounds.top,
+                unmap(box.right,  lb.dx, crop.width.toFloat())  + cropBounds.left,
+                unmap(box.bottom, lb.dy, crop.height.toFloat()) + cropBounds.top
+            )
         }
     }
 
@@ -383,6 +417,7 @@ class MainActivity : AppCompatActivity() {
         mapper: (RectF) -> RectF
     ): CandidateResult? {
         val detections = digitModel.detect(processedBitmap)
+        Log.d(TAG, "evaluateVariant: digitModel returned ${detections.size} raw detections")
         if (detections.isEmpty()) return null
 
         val rawDigits = detections.filterNot { it.isDot }
@@ -457,92 +492,6 @@ class MainActivity : AppCompatActivity() {
         return Rect(left, top, right, bottom)
     }
 
-    private fun mapProcessedHorizontalBoxToFullFrame(
-        box: RectF,
-        cropW: Int,
-        cropH: Int,
-        cropBounds: Rect
-    ): RectF {
-        val sx = cropW / 400f
-        val sy = cropH / 150f
-        return offsetRect(
-            RectF(box.left * sx, box.top * sy, box.right * sx, box.bottom * sy),
-            cropBounds.left.toFloat(),
-            cropBounds.top.toFloat()
-        )
-    }
-
-    private fun mapProcessedSquareBoxToFullFrame(
-        box: RectF,
-        scale: Float,
-        cropBounds: Rect
-    ): RectF {
-        return offsetRect(
-            RectF(box.left / scale, box.top / scale, box.right / scale, box.bottom / scale),
-            cropBounds.left.toFloat(),
-            cropBounds.top.toFloat()
-        )
-    }
-
-    private fun mapProcessedVerticalLeftBoxToFullFrame(
-        box: RectF,
-        originalW: Int,
-        originalH: Int,
-        cropBounds: Rect
-    ): RectF {
-        val rotW = originalH.toFloat()
-        val rotH = originalW.toFloat()
-        val sx = rotW / 400f
-        val sy = rotH / 150f
-        val inRotated = RectF(box.left * sx, box.top * sy, box.right * sx, box.bottom * sy)
-        val inOriginal = mapRectByCorners(inRotated) { xR, yR ->
-            val xO = originalW - yR
-            val yO = xR
-            xO to yO
-        }
-        return offsetRect(inOriginal, cropBounds.left.toFloat(), cropBounds.top.toFloat())
-    }
-
-    private fun mapProcessedVerticalRightBoxToFullFrame(
-        box: RectF,
-        originalW: Int,
-        originalH: Int,
-        cropBounds: Rect
-    ): RectF {
-        val rotW = originalH.toFloat()
-        val rotH = originalW.toFloat()
-        val sx = rotW / 400f
-        val sy = rotH / 150f
-        val inRotated = RectF(box.left * sx, box.top * sy, box.right * sx, box.bottom * sy)
-        val inOriginal = mapRectByCorners(inRotated) { xR, yR ->
-            val xO = yR
-            val yO = originalH - xR
-            xO to yO
-        }
-        return offsetRect(inOriginal, cropBounds.left.toFloat(), cropBounds.top.toFloat())
-    }
-
-    private fun offsetRect(rect: RectF, dx: Float, dy: Float): RectF {
-        return RectF(rect.left + dx, rect.top + dy, rect.right + dx, rect.bottom + dy)
-    }
-
-    private fun mapRectByCorners(
-        source: RectF,
-        mapper: (Float, Float) -> Pair<Float, Float>
-    ): RectF {
-        val points = listOf(
-            mapper(source.left, source.top),
-            mapper(source.right, source.top),
-            mapper(source.left, source.bottom),
-            mapper(source.right, source.bottom)
-        )
-        val minX = points.minOf { it.first }
-        val minY = points.minOf { it.second }
-        val maxX = points.maxOf { it.first }
-        val maxY = points.maxOf { it.second }
-        return RectF(minX, minY, maxX, maxY)
-    }
-
     private fun remapFromLetterbox(
         det: Detection,
         letterbox: LetterboxResult,
@@ -558,6 +507,36 @@ class MainActivity : AppCompatActivity() {
             xCenter = box.centerX(),
             yCenter = box.centerY(),
             box = box
+        )
+    }
+
+    /**
+     * Adjust a detected display box so it always satisfies the 3.5:1 (width:height) aspect
+     * ratio that is typical for electricity/gas meter display panels.  The box is expanded
+     * on the shorter axis around the same centre and then clamped to the frame boundaries.
+     */
+    private fun enforceDisplayAspectRatio(box: RectF, frameW: Int, frameH: Int): RectF {
+        val boxW = box.width()
+        val boxH = box.height()
+        if (boxW <= 0f || boxH <= 0f) return box
+
+        val cx = box.centerX()
+        val cy = box.centerY()
+        val currentAspect = boxW / boxH
+
+        val (newW, newH) = if (currentAspect < DISPLAY_ASPECT_RATIO) {
+            // Too tall → widen to match target aspect ratio
+            boxH * DISPLAY_ASPECT_RATIO to boxH
+        } else {
+            // Too wide → heighten to match target aspect ratio
+            boxW to boxW / DISPLAY_ASPECT_RATIO
+        }
+
+        return RectF(
+            (cx - newW / 2f).coerceAtLeast(0f),
+            (cy - newH / 2f).coerceAtLeast(0f),
+            (cx + newW / 2f).coerceAtMost(frameW.toFloat()),
+            (cy + newH / 2f).coerceAtMost(frameH.toFloat())
         )
     }
 
@@ -593,6 +572,47 @@ class MainActivity : AppCompatActivity() {
                 message = "Lectura aceptada. Pulsa Reintentar para capturar otra."
             )
         }
+        binding.btnToggleMode.setOnClickListener {
+            toggleMode()
+        }
+        binding.btnCapture.setOnClickListener {
+            captureNextFrame.set(true)
+            showCaptureButton(false)
+            updateUi(
+                state = ReaderState.PATROL,
+                reading = null,
+                message = "Procesando captura..."
+            )
+        }
+    }
+
+    private fun toggleMode() {
+        isPhotoMode = !isPhotoMode
+        captureNextFrame.set(false)
+        finalReading = null
+        lastStableBox = null
+        stableSinceMs = 0L
+        currentState = ReaderState.PATROL
+        showDecisionButtons(false)
+        binding.overlayView.clearAll()
+
+        if (isPhotoMode) {
+            binding.btnToggleMode.text = getString(R.string.mode_photo)
+            showCaptureButton(true)
+            updateUi(
+                state = ReaderState.PATROL,
+                reading = null,
+                message = "Modo Foto: presiona Capturar para fotografiar el display."
+            )
+        } else {
+            binding.btnToggleMode.text = getString(R.string.mode_live)
+            showCaptureButton(false)
+            updateUi(
+                state = ReaderState.PATROL,
+                reading = null,
+                message = "Modo Vivo: apunta al display. El análisis corre a 2 FPS."
+            )
+        }
     }
 
     private fun resetToPatrol() {
@@ -600,18 +620,35 @@ class MainActivity : AppCompatActivity() {
         lastStableBox = null
         stableSinceMs = 0L
         currentState = ReaderState.PATROL
+        captureNextFrame.set(false)
         showDecisionButtons(false)
         binding.overlayView.clearAll()
-        updateUi(
-            state = ReaderState.PATROL,
-            reading = null,
-            message = "Apunta al display. El análisis corre a 2 FPS."
-        )
+
+        if (isPhotoMode) {
+            showCaptureButton(true)
+            updateUi(
+                state = ReaderState.PATROL,
+                reading = null,
+                message = "Modo Foto: presiona Capturar para fotografiar el display."
+            )
+        } else {
+            updateUi(
+                state = ReaderState.PATROL,
+                reading = null,
+                message = "Apunta al display. El análisis corre a 2 FPS."
+            )
+        }
     }
 
     private fun showDecisionButtons(show: Boolean) {
         binding.btnAccept.visibility = if (show) View.VISIBLE else View.GONE
         binding.btnRetry.visibility = if (show) View.VISIBLE else View.GONE
+        // While showing the result, hide Capture so the UI isn't cluttered.
+        if (show) showCaptureButton(false)
+    }
+
+    private fun showCaptureButton(show: Boolean) {
+        binding.btnCapture.visibility = if (show) View.VISIBLE else View.GONE
     }
 
     private fun updateUi(state: ReaderState, reading: String?, message: String) {

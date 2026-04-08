@@ -10,4 +10,7 @@
     <string name="hint_patrol">Apunta al display. El análisis corre a 2 FPS.</string>
     <string name="retry">Reintentar</string>
     <string name="accept">Aceptar lectura</string>
+    <string name="mode_live">▶ Modo Vivo</string>
+    <string name="mode_photo">📷 Modo Foto</string>
+    <string name="capture">Capturar foto</string>
 </resources>

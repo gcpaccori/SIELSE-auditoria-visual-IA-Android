@@ -83,13 +83,16 @@ class OverlayView @JvmOverloads constructor(
     }
 
     private fun mapRect(source: RectF): RectF {
-        val scaleX = width / previewWidth.toFloat()
-        val scaleY = height / previewHeight.toFloat()
+        // PreviewView uses FILL_CENTER: uniform scale = max(viewW/srcW, viewH/srcH),
+        // content centred, excess cropped. Both axes must use the same scale with offsets.
+        val scale = maxOf(width / previewWidth.toFloat(), height / previewHeight.toFloat())
+        val offsetX = (width - previewWidth * scale) / 2f
+        val offsetY = (height - previewHeight * scale) / 2f
         return RectF(
-            source.left * scaleX,
-            source.top * scaleY,
-            source.right * scaleX,
-            source.bottom * scaleY
+            source.left * scale + offsetX,
+            source.top * scale + offsetY,
+            source.right * scale + offsetX,
+            source.bottom * scale + offsetY
         )
     }
 }
