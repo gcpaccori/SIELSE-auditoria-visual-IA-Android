@@ -3,6 +3,7 @@ package com.gabriel.meterreader
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.Bundle
@@ -172,9 +173,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun analyzeImage(imageProxy: ImageProxy) {
         try {
-            previewFrameWidth = imageProxy.width
-            previewFrameHeight = imageProxy.height
-
             if (currentState == ReaderState.READY || currentState == ReaderState.PROCESSING) {
                 imageProxy.close()
                 return
@@ -192,8 +190,24 @@ class MainActivity : AppCompatActivity() {
             }
 
             lastPatrolInferenceAt = now
-            val bitmap = imageProxy.toBitmap()
+            val rawBitmap = imageProxy.toBitmap()
+            val rotationDegrees = imageProxy.imageInfo.rotationDegrees
             imageProxy.close()
+
+            // Rotate the bitmap to match the display orientation so that YOLO receives
+            // an upright image and all coordinates are in the same space as the preview.
+            val bitmap = if (rotationDegrees != 0) {
+                val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+                val rotated = Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
+                rawBitmap.recycle()
+                rotated
+            } else {
+                rawBitmap
+            }
+
+            // After rotation these dimensions match what the preview actually shows.
+            previewFrameWidth = bitmap.width
+            previewFrameHeight = bitmap.height
 
             val displayModel = displayDetector ?: run {
                 isProcessing.set(false)
