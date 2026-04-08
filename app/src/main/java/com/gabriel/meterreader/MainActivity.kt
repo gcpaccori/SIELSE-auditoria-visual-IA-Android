@@ -399,17 +399,14 @@ class MainActivity : AppCompatActivity() {
         Log.d(TAG, "buildBestCandidate: crop ${crop.width}×${crop.height}, running digit model")
         val lb = BitmapUtils.letterboxToSquare(crop, 320)
         return evaluateVariant(lb.bitmap, digitModel) { box ->
-            // 1) map from letterbox (320×320) space back to crop space
-            val cropX1 = ((box.left  - lb.dx) / lb.scale).coerceIn(0f, crop.width.toFloat())
-            val cropY1 = ((box.top   - lb.dy) / lb.scale).coerceIn(0f, crop.height.toFloat())
-            val cropX2 = ((box.right - lb.dx) / lb.scale).coerceIn(0f, crop.width.toFloat())
-            val cropY2 = ((box.bottom - lb.dy) / lb.scale).coerceIn(0f, crop.height.toFloat())
-            // 2) offset by cropBounds origin to get full-frame coordinates
+            // Invert the letterbox transform to map from 320×320 space back to crop space,
+            // then shift by the crop origin to get full-frame coordinates.
+            fun unmap(v: Float, offset: Float, max: Float) = ((v - offset) / lb.scale).coerceIn(0f, max)
             RectF(
-                cropX1 + cropBounds.left,
-                cropY1 + cropBounds.top,
-                cropX2 + cropBounds.left,
-                cropY2 + cropBounds.top
+                unmap(box.left,   lb.dx, crop.width.toFloat())  + cropBounds.left,
+                unmap(box.top,    lb.dy, crop.height.toFloat()) + cropBounds.top,
+                unmap(box.right,  lb.dx, crop.width.toFloat())  + cropBounds.left,
+                unmap(box.bottom, lb.dy, crop.height.toFloat()) + cropBounds.top
             )
         }
     }
@@ -651,7 +648,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showCaptureButton(show: Boolean) {
-        binding.btnCapture.visibility = if (show && isPhotoMode) View.VISIBLE else View.GONE
+        binding.btnCapture.visibility = if (show) View.VISIBLE else View.GONE
     }
 
     private fun updateUi(state: ReaderState, reading: String?, message: String) {
