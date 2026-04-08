@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Offline Meter Reader</string>
+    <string name="state_patrol">Estado: patrullaje</string>
+    <string name="state_locking">Estado: fijación</string>
+    <string name="state_processing">Estado: procesamiento</string>
+    <string name="state_ready">Estado: lectura lista</string>
+    <string name="state_error">Estado: error</string>
+    <string name="result_placeholder">Lectura: --</string>
+    <string name="hint_patrol">Apunta al display. El análisis corre a 2 FPS.</string>
+    <string name="retry">Reintentar</string>
+    <string name="accept">Aceptar lectura</string>
+</resources>

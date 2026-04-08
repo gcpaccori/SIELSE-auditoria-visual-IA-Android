@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#000000</color>
+    <color name="white">#FFFFFF</color>
+    <color name="overlay_green">#00E676</color>
+    <color name="overlay_yellow">#FFEA00</color>
+    <color name="overlay_red">#FF5252</color>
+    <color name="overlay_blue">#40C4FF</color>
+</resources>

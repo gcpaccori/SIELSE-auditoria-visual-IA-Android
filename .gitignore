@@ -1,0 +1,25 @@
+# Gradle
+.gradle
+/build
+/app/build
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Local config
+local.properties
+
+# Logs y Temporales
+*.log
+*.tmp
+*.bak
+conversion_report.txt
+
+# Otros
+.DS_Store
+captures/
+.externalNativeBuild
+.cxx
