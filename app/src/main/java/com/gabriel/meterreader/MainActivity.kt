@@ -85,7 +85,7 @@ class MainActivity : AppCompatActivity() {
         private const val LIVE_DIGIT_INTERVAL_MS = 180L
         /** In digits-only mode we assume the meter display is centered and almost full width. */
         private const val CENTRAL_ROI_WIDTH_RATIO = 0.92f
-        private const val DIGIT_ONLY_MODE_CONFIDENCE = 1f
+        private const val DIGIT_ONLY_SYNTHETIC_CONFIDENCE = 1f
         private const val MAX_CAPTURE_EDGE = 1600
         private const val MAX_CAPTURE_FILES = 200
     }
@@ -250,7 +250,7 @@ class MainActivity : AppCompatActivity() {
             previewFrameHeight = bitmap.height
             try {
                 val (displayBox, displayConfidence) = if (isDigitOnlyMode) {
-                    enforceDisplayAspectRatio(buildCentralDisplayBox(bitmap.width, bitmap.height), bitmap.width, bitmap.height) to DIGIT_ONLY_MODE_CONFIDENCE
+                    buildCentralDisplayBox(bitmap.width, bitmap.height) to DIGIT_ONLY_SYNTHETIC_CONFIDENCE
                 } else {
                     val displayModel = displayDetector ?: run {
                         isProcessing.set(false)
@@ -623,12 +623,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun savePhotoPair(frameBitmap: Bitmap, displayBox: RectF, digits: List<Detection>): Boolean {
+        var scaledRaw: Bitmap? = null
+        var createdScaled = false
+        var annotated: Bitmap? = null
         return try {
             val directory = File(getExternalFilesDir(Environment.DIRECTORY_PICTURES), "captures").apply { mkdirs() }
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
             val rawFile = File(directory, "${timestamp}_sin_reconocimiento.jpg")
             val recognizedFile = File(directory, "${timestamp}_con_reconocimiento.jpg")
-            val (scaledRaw, createdScaled) = scaleDownForCapture(frameBitmap, maxEdge = MAX_CAPTURE_EDGE)
+            val scaledInfo = scaleDownForCapture(frameBitmap, maxEdge = MAX_CAPTURE_EDGE)
+            scaledRaw = scaledInfo.first
+            createdScaled = scaledInfo.second
 
             FileOutputStream(rawFile).use { output ->
                 scaledRaw.compress(Bitmap.CompressFormat.JPEG, 90, output)
@@ -642,17 +647,18 @@ class MainActivity : AppCompatActivity() {
                 det.copy(box = box, xCenter = box.centerX(), yCenter = box.centerY())
             }
 
-            val annotated = drawRecognizedBitmap(scaledRaw, scaledDisplay, scaledDigits)
+            annotated = drawRecognizedBitmap(scaledRaw, scaledDisplay, scaledDigits)
             FileOutputStream(recognizedFile).use { output ->
                 annotated.compress(Bitmap.CompressFormat.JPEG, 90, output)
             }
-            if (annotated !== scaledRaw && !annotated.isRecycled) annotated.recycle()
-            if (createdScaled && !scaledRaw.isRecycled) scaledRaw.recycle()
             cleanupOldCaptures(directory)
             true
         } catch (e: Exception) {
             Log.e(TAG, "savePhotoPair error", e)
             false
+        } finally {
+            annotated?.let { if (it !== scaledRaw && !it.isRecycled) it.recycle() }
+            scaledRaw?.let { if (createdScaled && !it.isRecycled) it.recycle() }
         }
     }
 
@@ -678,11 +684,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun drawRecognizedBitmap(source: Bitmap, displayBox: RectF, digits: List<Detection>): Bitmap {
-        val output = if (source.isMutable && source.config == Bitmap.Config.ARGB_8888) {
-            source
-        } else {
-            source.copy(Bitmap.Config.ARGB_8888, true)
-        }
+        val output = source.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(output)
 
         val displayPaint = Paint().apply {
