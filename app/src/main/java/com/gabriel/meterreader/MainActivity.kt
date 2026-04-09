@@ -125,7 +125,6 @@ class MainActivity : AppCompatActivity() {
                 config = ModelConfig(
                     modelFile = "display_detection_int8.onnx",
                     labelsFile = "labels_display.txt",
-                    inputSize = 320,
                     confidenceThreshold = 0.25f,
                     iouThreshold = 0.50f
                 )
@@ -135,7 +134,6 @@ class MainActivity : AppCompatActivity() {
                 config = ModelConfig(
                     modelFile = "digit_recognition_int8.onnx",
                     labelsFile = "labels_digits.txt",
-                    inputSize = 320,
                     confidenceThreshold = 0.30f,
                     iouThreshold = 0.20f
                 )
@@ -256,7 +254,15 @@ class MainActivity : AppCompatActivity() {
                         isProcessing.set(false)
                         return
                     }
-                    val displayInput = BitmapUtils.letterboxToSquare(bitmap, 320)
+                    val (displayInputW, displayInputH) = displayModel.resolveInputSize(
+                        defaultWidth = bitmap.width,
+                        defaultHeight = bitmap.height
+                    )
+                    val displayInput = BitmapUtils.letterbox(
+                        source = bitmap,
+                        targetWidth = displayInputW,
+                        targetHeight = displayInputH
+                    )
                     try {
                         val displayDetections = displayModel.detect(displayInput.bitmap)
                             .map { remapFromLetterbox(it, displayInput, bitmap.width, bitmap.height) }
@@ -446,14 +452,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Letterbox the crop to 320×320 (the model's expected input size), run the digit
-     * model, and remap detected boxes back to full-frame coordinates.
-     *
-     * Previously the code resized the crop to arbitrary dimensions (e.g. 400×150) which
-     * caused the ONNX model—whose input tensor is fixed at [1,3,320,320]—to either throw
-     * a shape-mismatch error or return empty detections.  Using letterboxToSquare ensures
-     * the model always receives the correct input shape while preserving the crop's aspect
-     * ratio (the horizontal bar-shaped display area is centred in the 320×320 canvas).
+     * Letterbox the crop to the digit model expected input size, run the model,
+     * and remap detected boxes back to full-frame coordinates.
      */
     private fun buildBestCandidate(
         crop: Bitmap,
@@ -461,10 +461,18 @@ class MainActivity : AppCompatActivity() {
         digitModel: OnnxYoloDetector
     ): CandidateResult? {
         Log.d(TAG, "buildBestCandidate: crop ${crop.width}×${crop.height}, running digit model")
-        val lb = BitmapUtils.letterboxToSquare(crop, 320)
+        val (digitInputW, digitInputH) = digitModel.resolveInputSize(
+            defaultWidth = crop.width,
+            defaultHeight = crop.height
+        )
+        val lb = BitmapUtils.letterbox(
+            source = crop,
+            targetWidth = digitInputW,
+            targetHeight = digitInputH
+        )
         return try {
             evaluateVariant(lb.bitmap, digitModel) { box ->
-                // Invert the letterbox transform to map from 320×320 space back to crop space,
+                // Invert the letterbox transform to map model space back to crop space,
                 // then shift by the crop origin to get full-frame coordinates.
                 fun unmap(v: Float, offset: Float, max: Float) = ((v - offset) / lb.scale).coerceIn(0f, max)
                 RectF(

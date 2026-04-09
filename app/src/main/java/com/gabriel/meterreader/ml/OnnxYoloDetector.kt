@@ -6,6 +6,7 @@ import android.graphics.RectF
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.TensorInfo
 import com.gabriel.meterreader.domain.Detection
 import com.gabriel.meterreader.util.AssetUtils
 import kotlin.math.max
@@ -30,6 +31,22 @@ class OnnxYoloDetector(
     }
 
     private val inputName: String by lazy { session.inputNames.first() }
+    private val modelInputShape: LongArray? by lazy {
+        val inputInfo = session.inputInfo[inputName]?.info as? TensorInfo
+        inputInfo?.shape
+    }
+
+    val inputHeight: Int
+        get() = modelInputShape?.getOrNull(2)?.takeIf { it > 0 }?.toInt() ?: -1
+
+    val inputWidth: Int
+        get() = modelInputShape?.getOrNull(3)?.takeIf { it > 0 }?.toInt() ?: -1
+
+    fun resolveInputSize(defaultWidth: Int, defaultHeight: Int): Pair<Int, Int> {
+        val width = if (inputWidth > 0) inputWidth else defaultWidth
+        val height = if (inputHeight > 0) inputHeight else defaultHeight
+        return width.coerceAtLeast(1) to height.coerceAtLeast(1)
+    }
 
     fun detect(bitmap: Bitmap): List<Detection> {
         val inputTensor = bitmapToTensor(bitmap)
