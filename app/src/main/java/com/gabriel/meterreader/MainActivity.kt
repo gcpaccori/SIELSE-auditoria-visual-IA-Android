@@ -298,8 +298,7 @@ class MainActivity : AppCompatActivity() {
                         lastStableBox = null
                         stableSinceMs = 0L
                         val canHoldOverlay = !isPhotoMode &&
-                            shouldHoldLiveOverlay(now) &&
-                            lastLiveDisplayBox != null
+                            shouldHoldLiveOverlay(now)
                         val cachedDisplayBox = lastLiveDisplayBox?.let { RectF(it) }
                         runOnUiThread {
                             if (canHoldOverlay && cachedDisplayBox != null) {
@@ -352,11 +351,15 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     now - lastLiveDigitsInferenceAt >= liveDigitsIntervalMs -> {
+                        val confidenceSummary = buildConfidenceSummary(
+                            displayConfidence = displayConfidence,
+                            digitConfidence = lastLiveReadingConfidence
+                        )
                         runOnUiThread {
                             updateUi(
                                 state = ReaderState.PROCESSING,
                                 reading = lastLiveReading,
-                                message = "Reconociendo en vivo... (display ${formatPercent(displayConfidence)}${lastLiveReadingConfidence?.let { ", dígitos ${formatPercent(it)}" } ?: ""})"
+                                message = "Reconociendo en vivo... ($confidenceSummary)"
                             )
                             binding.overlayView.update(displayBox, lastLiveDigits, previewFrameWidth, previewFrameHeight)
                         }
@@ -366,6 +369,10 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     else -> {
+                        val confidenceSummary = buildConfidenceSummary(
+                            displayConfidence = displayConfidence,
+                            digitConfidence = lastLiveReadingConfidence
+                        )
                         runOnUiThread {
                             binding.overlayView.update(displayBox, lastLiveDigits, previewFrameWidth, previewFrameHeight)
                             updateUi(
@@ -374,7 +381,7 @@ class MainActivity : AppCompatActivity() {
                                 message = if (isDigitOnlyMode) {
                                     "ROI central activo. Ajusta ángulo/distancia..."
                                 } else {
-                                    "Display ${formatPercent(displayConfidence)}${lastLiveReadingConfidence?.let { ", dígitos ${formatPercent(it)}" } ?: ""}."
+                                    "Display $confidenceSummary."
                                 }
                             )
                         }
@@ -456,13 +463,14 @@ class MainActivity : AppCompatActivity() {
                 lastLiveSeenAtMs = SystemClock.elapsedRealtime()
                 runOnUiThread {
                     binding.overlayView.update(displayBox, overlayDigits, previewFrameWidth, previewFrameHeight)
+                    val confidenceSuffix = confidenceSuffix(digitConfidence)
                     updateUi(
                         state = ReaderState.PATROL,
                         reading = reading,
                         message = if (reading == "ilegible") {
-                            "Lectura en vivo: ilegible${digitConfidence?.let { " (${formatPercent(it)} confianza)" } ?: ""}"
+                            "Lectura en vivo: ilegible$confidenceSuffix"
                         } else {
-                            "Lectura en vivo: $reading${digitConfidence?.let { " (${formatPercent(it)} confianza)" } ?: ""}"
+                            "Lectura en vivo: $reading$confidenceSuffix"
                         }
                     )
                     showDecisionButtons(false)
@@ -944,6 +952,10 @@ class MainActivity : AppCompatActivity() {
     private fun buildConfidenceSummary(displayConfidence: Float, digitConfidence: Float?): String {
         val digitPart = digitConfidence?.let { ", ${formatPercent(it)} dígitos" } ?: ""
         return "${formatPercent(displayConfidence)} display$digitPart"
+    }
+
+    private fun confidenceSuffix(digitConfidence: Float?): String {
+        return digitConfidence?.let { " (${formatPercent(it)} confianza)" } ?: ""
     }
 
     override fun onDestroy() {
