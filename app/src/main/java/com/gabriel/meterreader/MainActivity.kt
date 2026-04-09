@@ -85,6 +85,7 @@ class MainActivity : AppCompatActivity() {
         private const val LIVE_DIGIT_INTERVAL_MS = 180L
         /** In digits-only mode we assume the meter display is centered and almost full width. */
         private const val CENTRAL_ROI_WIDTH_RATIO = 0.92f
+        private const val DIGIT_ONLY_MODE_CONFIDENCE = 1f
         private const val MAX_CAPTURE_EDGE = 1600
         private const val MAX_CAPTURE_FILES = 200
     }
@@ -249,7 +250,7 @@ class MainActivity : AppCompatActivity() {
             previewFrameHeight = bitmap.height
             try {
                 val (displayBox, displayConfidence) = if (isDigitOnlyMode) {
-                    enforceDisplayAspectRatio(buildCentralDisplayBox(bitmap.width, bitmap.height), bitmap.width, bitmap.height) to 1f
+                    enforceDisplayAspectRatio(buildCentralDisplayBox(bitmap.width, bitmap.height), bitmap.width, bitmap.height) to DIGIT_ONLY_MODE_CONFIDENCE
                 } else {
                     val displayModel = displayDetector ?: run {
                         isProcessing.set(false)
@@ -627,7 +628,7 @@ class MainActivity : AppCompatActivity() {
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
             val rawFile = File(directory, "${timestamp}_sin_reconocimiento.jpg")
             val recognizedFile = File(directory, "${timestamp}_con_reconocimiento.jpg")
-            val scaledRaw = scaleDownForCapture(frameBitmap, maxEdge = MAX_CAPTURE_EDGE)
+            val (scaledRaw, createdScaled) = scaleDownForCapture(frameBitmap, maxEdge = MAX_CAPTURE_EDGE)
 
             FileOutputStream(rawFile).use { output ->
                 scaledRaw.compress(Bitmap.CompressFormat.JPEG, 90, output)
@@ -645,8 +646,8 @@ class MainActivity : AppCompatActivity() {
             FileOutputStream(recognizedFile).use { output ->
                 annotated.compress(Bitmap.CompressFormat.JPEG, 90, output)
             }
-            annotated.recycle()
-            if (scaledRaw !== frameBitmap && !scaledRaw.isRecycled) scaledRaw.recycle()
+            if (annotated !== scaledRaw && !annotated.isRecycled) annotated.recycle()
+            if (createdScaled && !scaledRaw.isRecycled) scaledRaw.recycle()
             cleanupOldCaptures(directory)
             true
         } catch (e: Exception) {
@@ -655,13 +656,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun scaleDownForCapture(source: Bitmap, maxEdge: Int): Bitmap {
+    private fun scaleDownForCapture(source: Bitmap, maxEdge: Int): Pair<Bitmap, Boolean> {
         val maxCurrent = maxOf(source.width, source.height)
-        if (maxCurrent <= maxEdge) return source
+        if (maxCurrent <= maxEdge) return source to false
         val scale = maxEdge / maxCurrent.toFloat()
         val targetW = (source.width * scale).toInt().coerceAtLeast(1)
         val targetH = (source.height * scale).toInt().coerceAtLeast(1)
-        return Bitmap.createScaledBitmap(source, targetW, targetH, true)
+        return Bitmap.createScaledBitmap(source, targetW, targetH, true) to true
     }
 
     private fun cleanupOldCaptures(directory: File) {
@@ -669,11 +670,19 @@ class MainActivity : AppCompatActivity() {
         if (files.size <= MAX_CAPTURE_FILES) return
         files.sortedBy { it.lastModified() }
             .take(files.size - MAX_CAPTURE_FILES)
-            .forEach { it.delete() }
+            .forEach {
+                if (!it.delete()) {
+                    Log.w(TAG, "No se pudo eliminar captura antigua: ${it.name}")
+                }
+            }
     }
 
     private fun drawRecognizedBitmap(source: Bitmap, displayBox: RectF, digits: List<Detection>): Bitmap {
-        val output = source.copy(Bitmap.Config.ARGB_8888, true)
+        val output = if (source.isMutable && source.config == Bitmap.Config.ARGB_8888) {
+            source
+        } else {
+            source.copy(Bitmap.Config.ARGB_8888, true)
+        }
         val canvas = Canvas(output)
 
         val displayPaint = Paint().apply {
