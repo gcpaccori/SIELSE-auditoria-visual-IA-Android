@@ -300,11 +300,15 @@ class MainActivity : AppCompatActivity() {
                         val canHoldOverlay = !isPhotoMode &&
                             shouldHoldLiveOverlay(now) &&
                             lastLiveDisplayBox != null
+                        val cachedDisplayBox = lastLiveDisplayBox?.let { RectF(it) }
+                        val confidenceSummary = buildConfidenceSummary(
+                            displayConfidence = lastLiveDisplayConfidence,
+                            digitConfidence = lastLiveReadingConfidence
+                        )
                         runOnUiThread {
-                            if (canHoldOverlay) {
-                                val cachedDisplay = RectF(lastLiveDisplayBox!!)
+                            if (canHoldOverlay && cachedDisplayBox != null) {
                                 binding.overlayView.update(
-                                    cachedDisplay,
+                                    cachedDisplayBox,
                                     lastLiveDigits,
                                     previewFrameWidth,
                                     previewFrameHeight
@@ -312,7 +316,7 @@ class MainActivity : AppCompatActivity() {
                                 updateUi(
                                     state = ReaderState.PATROL,
                                     reading = lastLiveReading,
-                                    message = "Señal inestable. Manteniendo última lectura (${formatPercent(lastLiveDisplayConfidence)} display${lastLiveReadingConfidence?.let { ", ${formatPercent(it)} dígitos" } ?: ""})."
+                                    message = "Señal inestable. Manteniendo última lectura ($confidenceSummary)."
                                 )
                             } else {
                                 binding.overlayView.update(null, emptyList(), previewFrameWidth, previewFrameHeight)
@@ -935,6 +939,11 @@ class MainActivity : AppCompatActivity() {
         lastLiveReading = null
         lastLiveReadingConfidence = null
         lastLiveSeenAtMs = 0L
+    }
+
+    private fun buildConfidenceSummary(displayConfidence: Float, digitConfidence: Float?): String {
+        val digitPart = digitConfidence?.let { ", ${formatPercent(it)} dígitos" } ?: ""
+        return "${formatPercent(displayConfidence)} display$digitPart"
     }
 
     override fun onDestroy() {
