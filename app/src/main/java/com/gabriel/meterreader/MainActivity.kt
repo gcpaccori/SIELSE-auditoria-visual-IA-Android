@@ -59,9 +59,9 @@ class MainActivity : AppCompatActivity() {
 
     private var currentState: ReaderState = ReaderState.PATROL
     private var lastPatrolInferenceAt = 0L
-    private val patrolIntervalMs = 120L
+    private val patrolIntervalMs = PATROL_INTERVAL_MS
     private var lastLiveDigitsInferenceAt = 0L
-    private val liveDigitsIntervalMs = 180L
+    private val liveDigitsIntervalMs = LIVE_DIGIT_INTERVAL_MS
 
     private var lastStableBox: RectF? = null
     private var stableSinceMs = 0L
@@ -80,6 +80,13 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "MainActivity"
         /** Display panels are typically 3.5× wider than tall. */
         private const val DISPLAY_ASPECT_RATIO = 3.5f
+        /** Fast live scanning for field usage; tune on target hardware if needed. */
+        private const val PATROL_INTERVAL_MS = 120L
+        private const val LIVE_DIGIT_INTERVAL_MS = 180L
+        /** In digits-only mode we assume the meter display is centered and almost full width. */
+        private const val CENTRAL_ROI_WIDTH_RATIO = 0.92f
+        private const val MAX_CAPTURE_EDGE = 1600
+        private const val MAX_CAPTURE_FILES = 200
     }
 
     private val cameraPermissionLauncher =
@@ -408,16 +415,16 @@ class MainActivity : AppCompatActivity() {
                 }
             } else {
                 currentState = ReaderState.READY
-                val capturePath = savePhotoPair(frameBitmap, displayBox, overlayDigits)
+                val capturesSaved = savePhotoPair(frameBitmap, displayBox, overlayDigits)
                 runOnUiThread {
                     binding.overlayView.update(displayBox, overlayDigits, previewFrameWidth, previewFrameHeight)
                     updateUi(
                         state = ReaderState.READY,
                         reading = reading,
                         message = if (reading == "ilegible") {
-                            "No se pudo construir una lectura confiable. Reintenta.${capturePath?.let { " Guardado en: $it" } ?: ""}"
+                            "No se pudo construir una lectura confiable. Reintenta.${if (capturesSaved) " Capturas guardadas." else ""}"
                         } else {
-                            "Lectura lista. Acepta o reintenta.${capturePath?.let { " Guardado en: $it" } ?: ""}"
+                            "Lectura lista. Acepta o reintenta.${if (capturesSaved) " Capturas guardadas." else ""}"
                         }
                     )
                     showDecisionButtons(true)
@@ -602,7 +609,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildCentralDisplayBox(frameW: Int, frameH: Int): RectF {
-        val width = frameW * 0.92f
+        val width = frameW * CENTRAL_ROI_WIDTH_RATIO
         val height = width / DISPLAY_ASPECT_RATIO
         val cx = frameW / 2f
         val cy = frameH / 2f
@@ -614,27 +621,55 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun savePhotoPair(frameBitmap: Bitmap, displayBox: RectF, digits: List<Detection>): String? {
+    private fun savePhotoPair(frameBitmap: Bitmap, displayBox: RectF, digits: List<Detection>): Boolean {
         return try {
             val directory = File(getExternalFilesDir(Environment.DIRECTORY_PICTURES), "captures").apply { mkdirs() }
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
             val rawFile = File(directory, "${timestamp}_sin_reconocimiento.jpg")
             val recognizedFile = File(directory, "${timestamp}_con_reconocimiento.jpg")
+            val scaledRaw = scaleDownForCapture(frameBitmap, maxEdge = MAX_CAPTURE_EDGE)
 
             FileOutputStream(rawFile).use { output ->
-                frameBitmap.compress(Bitmap.CompressFormat.JPEG, 95, output)
+                scaledRaw.compress(Bitmap.CompressFormat.JPEG, 90, output)
             }
 
-            val annotated = drawRecognizedBitmap(frameBitmap, displayBox, digits)
+            val sx = scaledRaw.width / frameBitmap.width.toFloat()
+            val sy = scaledRaw.height / frameBitmap.height.toFloat()
+            val scaledDisplay = RectF(displayBox.left * sx, displayBox.top * sy, displayBox.right * sx, displayBox.bottom * sy)
+            val scaledDigits = digits.map { det ->
+                val box = RectF(det.box.left * sx, det.box.top * sy, det.box.right * sx, det.box.bottom * sy)
+                det.copy(box = box, xCenter = box.centerX(), yCenter = box.centerY())
+            }
+
+            val annotated = drawRecognizedBitmap(scaledRaw, scaledDisplay, scaledDigits)
             FileOutputStream(recognizedFile).use { output ->
-                annotated.compress(Bitmap.CompressFormat.JPEG, 95, output)
+                annotated.compress(Bitmap.CompressFormat.JPEG, 90, output)
             }
             annotated.recycle()
-            directory.absolutePath
+            if (scaledRaw !== frameBitmap && !scaledRaw.isRecycled) scaledRaw.recycle()
+            cleanupOldCaptures(directory)
+            true
         } catch (e: Exception) {
             Log.e(TAG, "savePhotoPair error", e)
-            null
+            false
         }
+    }
+
+    private fun scaleDownForCapture(source: Bitmap, maxEdge: Int): Bitmap {
+        val maxCurrent = maxOf(source.width, source.height)
+        if (maxCurrent <= maxEdge) return source
+        val scale = maxEdge / maxCurrent.toFloat()
+        val targetW = (source.width * scale).toInt().coerceAtLeast(1)
+        val targetH = (source.height * scale).toInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(source, targetW, targetH, true)
+    }
+
+    private fun cleanupOldCaptures(directory: File) {
+        val files = directory.listFiles()?.filter { it.isFile } ?: return
+        if (files.size <= MAX_CAPTURE_FILES) return
+        files.sortedBy { it.lastModified() }
+            .take(files.size - MAX_CAPTURE_FILES)
+            .forEach { it.delete() }
     }
 
     private fun drawRecognizedBitmap(source: Bitmap, displayBox: RectF, digits: List<Detection>): Bitmap {
