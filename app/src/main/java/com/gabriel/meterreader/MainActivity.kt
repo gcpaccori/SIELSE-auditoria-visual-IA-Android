@@ -301,12 +301,12 @@ class MainActivity : AppCompatActivity() {
                             shouldHoldLiveOverlay(now) &&
                             lastLiveDisplayBox != null
                         val cachedDisplayBox = lastLiveDisplayBox?.let { RectF(it) }
-                        val confidenceSummary = buildConfidenceSummary(
-                            displayConfidence = lastLiveDisplayConfidence,
-                            digitConfidence = lastLiveReadingConfidence
-                        )
                         runOnUiThread {
                             if (canHoldOverlay && cachedDisplayBox != null) {
+                                val confidenceSummary = buildConfidenceSummary(
+                                    displayConfidence = lastLiveDisplayConfidence,
+                                    digitConfidence = lastLiveReadingConfidence
+                                )
                                 binding.overlayView.update(
                                     cachedDisplayBox,
                                     lastLiveDigits,
