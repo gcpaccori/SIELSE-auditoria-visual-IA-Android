@@ -3,10 +3,14 @@ package com.gabriel.meterreader
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.Bundle
+import android.os.Environment
 import android.os.SystemClock
 import android.util.Log
 import android.util.Size
@@ -36,6 +40,11 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
@@ -50,7 +59,9 @@ class MainActivity : AppCompatActivity() {
 
     private var currentState: ReaderState = ReaderState.PATROL
     private var lastPatrolInferenceAt = 0L
-    private val patrolIntervalMs = 500L
+    private val patrolIntervalMs = 120L
+    private var lastLiveDigitsInferenceAt = 0L
+    private val liveDigitsIntervalMs = 180L
 
     private var lastStableBox: RectF? = null
     private var stableSinceMs = 0L
@@ -63,6 +74,7 @@ class MainActivity : AppCompatActivity() {
     // --- Mode: live vs photo ---
     private var isPhotoMode = false
     private val captureNextFrame = AtomicBoolean(false)
+    private var isDigitOnlyMode = false
 
     companion object {
         private const val TAG = "MainActivity"
@@ -124,7 +136,7 @@ class MainActivity : AppCompatActivity() {
                 updateUi(
                     state = ReaderState.PATROL,
                     reading = null,
-                    message = "Apunta al medidor. El display se analiza a 2 FPS."
+                    message = "Apunta al medidor. Análisis en vivo activado."
                 )
             }
         } catch (e: Exception) {
@@ -183,7 +195,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun analyzeImage(imageProxy: ImageProxy) {
         try {
-            if (currentState == ReaderState.READY || currentState == ReaderState.PROCESSING) {
+            if (currentState == ReaderState.PROCESSING || (isPhotoMode && currentState == ReaderState.READY)) {
                 imageProxy.close()
                 return
             }
@@ -197,7 +209,6 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
             } else {
-                // In live mode throttle to ~2 FPS.
                 if (now - lastPatrolInferenceAt < patrolIntervalMs) {
                     imageProxy.close()
                     return
@@ -229,81 +240,97 @@ class MainActivity : AppCompatActivity() {
             // After rotation these dimensions match what the preview actually shows.
             previewFrameWidth = bitmap.width
             previewFrameHeight = bitmap.height
-
-            val displayModel = displayDetector ?: run {
-                isProcessing.set(false)
-                return
-            }
-
-            val displayInput = BitmapUtils.letterboxToSquare(bitmap, 320)
-            val displayDetections = displayModel.detect(displayInput.bitmap)
-                .map { remapFromLetterbox(it, displayInput, bitmap.width, bitmap.height) }
-                .sortedByDescending { it.conf }
-
-            val rawDisplay = displayDetections.firstOrNull()
-            Log.d(TAG, "analyzeImage: display=${rawDisplay?.let { "conf=${it.conf} box=${it.box}" } ?: "none"}")
-
-            // Enforce the 3.5:1 (width:height) aspect ratio typical for meter displays
-            // before drawing the overlay and before cropping for digit recognition.
-            val display = rawDisplay?.let { det ->
-                val adjusted = enforceDisplayAspectRatio(det.box, bitmap.width, bitmap.height)
-                det.copy(box = adjusted, xCenter = adjusted.centerX(), yCenter = adjusted.centerY())
-            }
-
-            when {
-                display == null -> {
-                    lastStableBox = null
-                    stableSinceMs = 0L
-                    runOnUiThread {
-                        binding.overlayView.update(null, emptyList(), previewFrameWidth, previewFrameHeight)
-                        updateUi(
-                            state = ReaderState.PATROL,
-                            reading = null,
-                            message = if (isPhotoMode) "No se detectó display. Presiona Capturar de nuevo." else "Buscando display..."
-                        )
-                        if (isPhotoMode) showCaptureButton(true)
+            try {
+                val (displayBox, displayConfidence) = if (isDigitOnlyMode) {
+                    enforceDisplayAspectRatio(buildCentralDisplayBox(bitmap.width, bitmap.height), bitmap.width, bitmap.height) to 1f
+                } else {
+                    val displayModel = displayDetector ?: run {
+                        isProcessing.set(false)
+                        return
                     }
-                    isProcessing.set(false)
+                    val displayInput = BitmapUtils.letterboxToSquare(bitmap, 320)
+                    try {
+                        val displayDetections = displayModel.detect(displayInput.bitmap)
+                            .map { remapFromLetterbox(it, displayInput, bitmap.width, bitmap.height) }
+                            .sortedByDescending { it.conf }
+
+                        val rawDisplay = displayDetections.firstOrNull()
+                        Log.d(TAG, "analyzeImage: display=${rawDisplay?.let { "conf=${it.conf} box=${it.box}" } ?: "none"}")
+                        val adjusted = rawDisplay?.let { det ->
+                            val box = enforceDisplayAspectRatio(det.box, bitmap.width, bitmap.height)
+                            det.copy(box = box, xCenter = box.centerX(), yCenter = box.centerY())
+                        }
+                        adjusted?.box to (adjusted?.conf ?: 0f)
+                    } finally {
+                        displayInput.bitmap.recycle()
+                    }
                 }
 
-                isPhotoMode -> {
-                    // Photo mode: run digit recognition immediately without stabilisation.
-                    runOnUiThread {
-                        updateUi(
-                            state = ReaderState.PROCESSING,
-                            reading = null,
-                            message = "Display detectado. Reconociendo dígitos..."
-                        )
-                        binding.overlayView.update(display.box, emptyList(), previewFrameWidth, previewFrameHeight)
+                when {
+                    displayBox == null -> {
+                        lastStableBox = null
+                        stableSinceMs = 0L
+                        runOnUiThread {
+                            binding.overlayView.update(null, emptyList(), previewFrameWidth, previewFrameHeight)
+                            updateUi(
+                                state = ReaderState.PATROL,
+                                reading = null,
+                                message = if (isPhotoMode) {
+                                    "No se detectó display. Presiona Capturar de nuevo."
+                                } else {
+                                    "Buscando display..."
+                                }
+                            )
+                            if (isPhotoMode) showCaptureButton(true)
+                        }
+                        isProcessing.set(false)
                     }
-                    processFinalReading(bitmap, display.box)
-                    isProcessing.set(false)
-                }
 
-                isStable(display.box, now) -> {
-                    runOnUiThread {
-                        updateUi(
-                            state = ReaderState.PROCESSING,
-                            reading = null,
-                            message = "Display estable. Ejecutando reconocimiento de dígitos..."
-                        )
-                        binding.overlayView.update(display.box, emptyList(), previewFrameWidth, previewFrameHeight)
+                    isPhotoMode -> {
+                        runOnUiThread {
+                            updateUi(
+                                state = ReaderState.PROCESSING,
+                                reading = null,
+                                message = "Display detectado. Reconociendo dígitos..."
+                            )
+                            binding.overlayView.update(displayBox, emptyList(), previewFrameWidth, previewFrameHeight)
+                        }
+                        processFinalReading(bitmap, displayBox, liveMode = false)
+                        isProcessing.set(false)
                     }
-                    processFinalReading(bitmap, display.box)
-                    isProcessing.set(false)
-                }
 
-                else -> {
-                    runOnUiThread {
-                        binding.overlayView.update(display.box, emptyList(), previewFrameWidth, previewFrameHeight)
-                        updateUi(
-                            state = ReaderState.LOCKING,
-                            reading = null,
-                            message = "Mantenga quieto el dispositivo..."
-                        )
+                    now - lastLiveDigitsInferenceAt >= liveDigitsIntervalMs -> {
+                        runOnUiThread {
+                            updateUi(
+                                state = ReaderState.PROCESSING,
+                                reading = null,
+                                message = "Reconociendo en vivo..."
+                            )
+                            binding.overlayView.update(displayBox, emptyList(), previewFrameWidth, previewFrameHeight)
+                        }
+                        processFinalReading(bitmap, displayBox, liveMode = true)
+                        lastLiveDigitsInferenceAt = now
+                        isProcessing.set(false)
                     }
-                    isProcessing.set(false)
+
+                    else -> {
+                        runOnUiThread {
+                            binding.overlayView.update(displayBox, emptyList(), previewFrameWidth, previewFrameHeight)
+                            updateUi(
+                                state = ReaderState.LOCKING,
+                                reading = null,
+                                message = if (isDigitOnlyMode) {
+                                    "ROI central activo. Ajusta ángulo/distancia..."
+                                } else {
+                                    "Display ${"%.0f".format(displayConfidence * 100)}%."
+                                }
+                            )
+                        }
+                        isProcessing.set(false)
+                    }
                 }
+            } finally {
+                if (!bitmap.isRecycled) bitmap.recycle()
             }
         } catch (e: Exception) {
             Log.e(TAG, "analyzeImage error", e)
@@ -311,7 +338,7 @@ class MainActivity : AppCompatActivity() {
             isProcessing.set(false)
             runOnUiThread {
                 updateUi(
-                    state = ReaderState.ERROR,
+                    state = if (isPhotoMode) ReaderState.ERROR else ReaderState.PATROL,
                     reading = null,
                     message = "Error durante el análisis: ${e.message}"
                 )
@@ -319,9 +346,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun processFinalReading(frameBitmap: Bitmap, displayBox: RectF) {
+    private fun processFinalReading(frameBitmap: Bitmap, displayBox: RectF, liveMode: Boolean) {
         try {
-            currentState = ReaderState.PROCESSING
+            currentState = if (liveMode) ReaderState.PATROL else ReaderState.PROCESSING
             val digitModel = digitDetector ?: return
 
             val cropBounds = clampRectToBitmap(displayBox, frameBitmap.width, frameBitmap.height)
@@ -336,7 +363,19 @@ class MainActivity : AppCompatActivity() {
             )
 
             if (crop.width <= 1 || crop.height <= 1) {
-                showUnreadable(displayBox)
+                if (liveMode) {
+                    runOnUiThread {
+                        binding.overlayView.update(displayBox, emptyList(), previewFrameWidth, previewFrameHeight)
+                        updateUi(
+                            state = ReaderState.PATROL,
+                            reading = "ilegible",
+                            message = "Lectura en vivo: ilegible"
+                        )
+                    }
+                } else {
+                    showUnreadable(displayBox)
+                    savePhotoPair(frameBitmap, displayBox, emptyList())
+                }
                 return
             }
 
@@ -352,31 +391,48 @@ class MainActivity : AppCompatActivity() {
             val overlayDigits = candidate?.fullFrameDetections ?: emptyList()
 
             finalReading = reading
-            currentState = ReaderState.READY
-
-            runOnUiThread {
-                binding.overlayView.update(displayBox, overlayDigits, previewFrameWidth, previewFrameHeight)
-                updateUi(
-                    state = ReaderState.READY,
-                    reading = reading,
-                    message = if (reading == "ilegible") {
-                        "No se pudo construir una lectura confiable. Reintenta."
-                    } else {
-                        "Lectura lista. Acepta o reintenta."
-                    }
-                )
-                showDecisionButtons(true)
+            if (liveMode) {
+                currentState = ReaderState.PATROL
+                runOnUiThread {
+                    binding.overlayView.update(displayBox, overlayDigits, previewFrameWidth, previewFrameHeight)
+                    updateUi(
+                        state = ReaderState.PATROL,
+                        reading = reading,
+                        message = if (reading == "ilegible") {
+                            "Lectura en vivo: ilegible"
+                        } else {
+                            "Lectura en vivo: $reading"
+                        }
+                    )
+                    showDecisionButtons(false)
+                }
+            } else {
+                currentState = ReaderState.READY
+                val capturePath = savePhotoPair(frameBitmap, displayBox, overlayDigits)
+                runOnUiThread {
+                    binding.overlayView.update(displayBox, overlayDigits, previewFrameWidth, previewFrameHeight)
+                    updateUi(
+                        state = ReaderState.READY,
+                        reading = reading,
+                        message = if (reading == "ilegible") {
+                            "No se pudo construir una lectura confiable. Reintenta.${capturePath?.let { " Guardado en: $it" } ?: ""}"
+                        } else {
+                            "Lectura lista. Acepta o reintenta.${capturePath?.let { " Guardado en: $it" } ?: ""}"
+                        }
+                    )
+                    showDecisionButtons(true)
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "processFinalReading error", e)
-            currentState = ReaderState.ERROR
+            currentState = if (liveMode) ReaderState.PATROL else ReaderState.ERROR
             runOnUiThread {
                 updateUi(
-                    state = ReaderState.ERROR,
+                    state = if (liveMode) ReaderState.PATROL else ReaderState.ERROR,
                     reading = null,
-                    message = "Falló la inferencia final de dígitos."
+                    message = if (liveMode) "Lectura en vivo fallida, continuando..." else "Falló la inferencia final de dígitos."
                 )
-                showDecisionButtons(true)
+                if (!liveMode) showDecisionButtons(true)
             }
         }
     }
@@ -398,16 +454,21 @@ class MainActivity : AppCompatActivity() {
     ): CandidateResult? {
         Log.d(TAG, "buildBestCandidate: crop ${crop.width}×${crop.height}, running digit model")
         val lb = BitmapUtils.letterboxToSquare(crop, 320)
-        return evaluateVariant(lb.bitmap, digitModel) { box ->
-            // Invert the letterbox transform to map from 320×320 space back to crop space,
-            // then shift by the crop origin to get full-frame coordinates.
-            fun unmap(v: Float, offset: Float, max: Float) = ((v - offset) / lb.scale).coerceIn(0f, max)
-            RectF(
-                unmap(box.left,   lb.dx, crop.width.toFloat())  + cropBounds.left,
-                unmap(box.top,    lb.dy, crop.height.toFloat()) + cropBounds.top,
-                unmap(box.right,  lb.dx, crop.width.toFloat())  + cropBounds.left,
-                unmap(box.bottom, lb.dy, crop.height.toFloat()) + cropBounds.top
-            )
+        return try {
+            evaluateVariant(lb.bitmap, digitModel) { box ->
+                // Invert the letterbox transform to map from 320×320 space back to crop space,
+                // then shift by the crop origin to get full-frame coordinates.
+                fun unmap(v: Float, offset: Float, max: Float) = ((v - offset) / lb.scale).coerceIn(0f, max)
+                RectF(
+                    unmap(box.left,   lb.dx, crop.width.toFloat())  + cropBounds.left,
+                    unmap(box.top,    lb.dy, crop.height.toFloat()) + cropBounds.top,
+                    unmap(box.right,  lb.dx, crop.width.toFloat())  + cropBounds.left,
+                    unmap(box.bottom, lb.dy, crop.height.toFloat()) + cropBounds.top
+                )
+            }
+        } finally {
+            if (!crop.isRecycled) crop.recycle()
+            if (!lb.bitmap.isRecycled) lb.bitmap.recycle()
         }
     }
 
@@ -540,6 +601,80 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun buildCentralDisplayBox(frameW: Int, frameH: Int): RectF {
+        val width = frameW * 0.92f
+        val height = width / DISPLAY_ASPECT_RATIO
+        val cx = frameW / 2f
+        val cy = frameH / 2f
+        return RectF(
+            cx - width / 2f,
+            cy - height / 2f,
+            cx + width / 2f,
+            cy + height / 2f
+        )
+    }
+
+    private fun savePhotoPair(frameBitmap: Bitmap, displayBox: RectF, digits: List<Detection>): String? {
+        return try {
+            val directory = File(getExternalFilesDir(Environment.DIRECTORY_PICTURES), "captures").apply { mkdirs() }
+            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+            val rawFile = File(directory, "${timestamp}_sin_reconocimiento.jpg")
+            val recognizedFile = File(directory, "${timestamp}_con_reconocimiento.jpg")
+
+            FileOutputStream(rawFile).use { output ->
+                frameBitmap.compress(Bitmap.CompressFormat.JPEG, 95, output)
+            }
+
+            val annotated = drawRecognizedBitmap(frameBitmap, displayBox, digits)
+            FileOutputStream(recognizedFile).use { output ->
+                annotated.compress(Bitmap.CompressFormat.JPEG, 95, output)
+            }
+            annotated.recycle()
+            directory.absolutePath
+        } catch (e: Exception) {
+            Log.e(TAG, "savePhotoPair error", e)
+            null
+        }
+    }
+
+    private fun drawRecognizedBitmap(source: Bitmap, displayBox: RectF, digits: List<Detection>): Bitmap {
+        val output = source.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(output)
+
+        val displayPaint = Paint().apply {
+            color = Color.YELLOW
+            style = Paint.Style.STROKE
+            strokeWidth = 6f
+        }
+        val digitPaint = Paint().apply {
+            color = Color.CYAN
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+        }
+        val textPaint = Paint().apply {
+            color = Color.WHITE
+            textSize = 32f
+            style = Paint.Style.FILL
+            isAntiAlias = true
+        }
+        val textBgPaint = Paint().apply {
+            color = Color.argb(180, 0, 0, 0)
+            style = Paint.Style.FILL
+        }
+
+        canvas.drawRect(displayBox, displayPaint)
+        for (det in digits) {
+            canvas.drawRect(det.box, digitPaint)
+            val label = "${det.label} ${(det.conf * 100).toInt()}%"
+            val textW = textPaint.measureText(label)
+            val textH = textPaint.textSize + 14f
+            val top = (det.box.top - textH).coerceAtLeast(0f)
+            canvas.drawRect(det.box.left, top, det.box.left + textW + 16f, top + textH, textBgPaint)
+            canvas.drawText(label, det.box.left + 8f, top + textH - 10f, textPaint)
+        }
+        return output
+    }
+
     private fun ImageProxy.toBitmap(): Bitmap {
         val plane = planes[0]
         val buffer = plane.buffer
@@ -575,6 +710,20 @@ class MainActivity : AppCompatActivity() {
         binding.btnToggleMode.setOnClickListener {
             toggleMode()
         }
+        binding.btnToggleDetector.setOnClickListener {
+            isDigitOnlyMode = !isDigitOnlyMode
+            updateDetectorModeButton()
+            resetToPatrol()
+            updateUi(
+                state = ReaderState.PATROL,
+                reading = null,
+                message = if (isDigitOnlyMode) {
+                    "Modo rápido: reconocimiento de números en ROI central."
+                } else {
+                    "Modo estándar: detección de display + números."
+                }
+            )
+        }
         binding.btnCapture.setOnClickListener {
             captureNextFrame.set(true)
             showCaptureButton(false)
@@ -583,6 +732,15 @@ class MainActivity : AppCompatActivity() {
                 reading = null,
                 message = "Procesando captura..."
             )
+        }
+        updateDetectorModeButton()
+    }
+
+    private fun updateDetectorModeButton() {
+        binding.btnToggleDetector.text = if (isDigitOnlyMode) {
+            getString(R.string.detector_digits_only)
+        } else {
+            getString(R.string.detector_display)
         }
     }
 
@@ -610,7 +768,7 @@ class MainActivity : AppCompatActivity() {
             updateUi(
                 state = ReaderState.PATROL,
                 reading = null,
-                message = "Modo Vivo: apunta al display. El análisis corre a 2 FPS."
+                message = "Modo Vivo: apunta al display. Lectura continua activada."
             )
         }
     }
@@ -632,13 +790,13 @@ class MainActivity : AppCompatActivity() {
                 message = "Modo Foto: presiona Capturar para fotografiar el display."
             )
         } else {
-            updateUi(
-                state = ReaderState.PATROL,
-                reading = null,
-                message = "Apunta al display. El análisis corre a 2 FPS."
-            )
+                updateUi(
+                    state = ReaderState.PATROL,
+                    reading = null,
+                    message = "Apunta al display. Lectura continua activada."
+                )
+            }
         }
-    }
 
     private fun showDecisionButtons(show: Boolean) {
         binding.btnAccept.visibility = if (show) View.VISIBLE else View.GONE
