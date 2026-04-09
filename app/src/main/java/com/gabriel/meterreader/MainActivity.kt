@@ -70,6 +70,12 @@ class MainActivity : AppCompatActivity() {
     private var previewFrameWidth: Int = 1
     private var previewFrameHeight: Int = 1
     private var finalReading: String? = null
+    private var lastLiveDisplayBox: RectF? = null
+    private var lastLiveDisplayConfidence: Float = 0f
+    private var lastLiveDigits: List<Detection> = emptyList()
+    private var lastLiveReading: String? = null
+    private var lastLiveReadingConfidence: Float? = null
+    private var lastLiveSeenAtMs: Long = 0L
 
     // --- Mode: live vs photo ---
     private var isPhotoMode = false
@@ -86,6 +92,7 @@ class MainActivity : AppCompatActivity() {
         /** In digits-only mode we assume the meter display is centered and almost full width. */
         private const val CENTRAL_ROI_WIDTH_RATIO = 0.92f
         private const val DIGIT_ONLY_SYNTHETIC_CONFIDENCE = 1f
+        private const val LIVE_OVERLAY_HOLD_MS = 900L
         private const val MAX_CAPTURE_EDGE = 1600
         private const val MAX_CAPTURE_FILES = 200
     }
@@ -280,22 +287,49 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
+                if (displayBox != null && !isPhotoMode) {
+                    lastLiveDisplayBox = RectF(displayBox)
+                    lastLiveDisplayConfidence = displayConfidence
+                    lastLiveSeenAtMs = now
+                }
+
                 when {
                     displayBox == null -> {
                         lastStableBox = null
                         stableSinceMs = 0L
+                        val canHoldOverlay = !isPhotoMode &&
+                            shouldHoldLiveOverlay(now) &&
+                            lastLiveDisplayBox != null
                         runOnUiThread {
-                            binding.overlayView.update(null, emptyList(), previewFrameWidth, previewFrameHeight)
-                            updateUi(
-                                state = ReaderState.PATROL,
-                                reading = null,
-                                message = if (isPhotoMode) {
-                                    "No se detectó display. Presiona Capturar de nuevo."
-                                } else {
-                                    "Buscando display..."
-                                }
-                            )
+                            if (canHoldOverlay) {
+                                val cachedDisplay = RectF(lastLiveDisplayBox!!)
+                                binding.overlayView.update(
+                                    cachedDisplay,
+                                    lastLiveDigits,
+                                    previewFrameWidth,
+                                    previewFrameHeight
+                                )
+                                updateUi(
+                                    state = ReaderState.PATROL,
+                                    reading = lastLiveReading,
+                                    message = "Señal inestable. Manteniendo última lectura (${formatPercent(lastLiveDisplayConfidence)} display${lastLiveReadingConfidence?.let { ", ${formatPercent(it)} dígitos" } ?: ""})."
+                                )
+                            } else {
+                                binding.overlayView.update(null, emptyList(), previewFrameWidth, previewFrameHeight)
+                                updateUi(
+                                    state = ReaderState.PATROL,
+                                    reading = null,
+                                    message = if (isPhotoMode) {
+                                        "No se detectó display. Presiona Capturar de nuevo."
+                                    } else {
+                                        "Buscando display..."
+                                    }
+                                )
+                            }
                             if (isPhotoMode) showCaptureButton(true)
+                        }
+                        if (!canHoldOverlay) {
+                            clearLiveCache()
                         }
                         isProcessing.set(false)
                     }
@@ -317,10 +351,10 @@ class MainActivity : AppCompatActivity() {
                         runOnUiThread {
                             updateUi(
                                 state = ReaderState.PROCESSING,
-                                reading = null,
-                                message = "Reconociendo en vivo..."
+                                reading = lastLiveReading,
+                                message = "Reconociendo en vivo... (display ${formatPercent(displayConfidence)}${lastLiveReadingConfidence?.let { ", dígitos ${formatPercent(it)}" } ?: ""})"
                             )
-                            binding.overlayView.update(displayBox, emptyList(), previewFrameWidth, previewFrameHeight)
+                            binding.overlayView.update(displayBox, lastLiveDigits, previewFrameWidth, previewFrameHeight)
                         }
                         processFinalReading(bitmap, displayBox, liveMode = true)
                         lastLiveDigitsInferenceAt = now
@@ -329,14 +363,14 @@ class MainActivity : AppCompatActivity() {
 
                     else -> {
                         runOnUiThread {
-                            binding.overlayView.update(displayBox, emptyList(), previewFrameWidth, previewFrameHeight)
+                            binding.overlayView.update(displayBox, lastLiveDigits, previewFrameWidth, previewFrameHeight)
                             updateUi(
                                 state = ReaderState.LOCKING,
-                                reading = null,
+                                reading = lastLiveReading,
                                 message = if (isDigitOnlyMode) {
                                     "ROI central activo. Ajusta ángulo/distancia..."
                                 } else {
-                                    "Display ${"%.0f".format(displayConfidence * 100)}%."
+                                    "Display ${formatPercent(displayConfidence)}${lastLiveReadingConfidence?.let { ", dígitos ${formatPercent(it)}" } ?: ""}."
                                 }
                             )
                         }
@@ -407,19 +441,24 @@ class MainActivity : AppCompatActivity() {
 
             val reading = candidate?.reading?.takeIf { it.isNotBlank() } ?: "ilegible"
             val overlayDigits = candidate?.fullFrameDetections ?: emptyList()
+            val digitConfidence = candidate?.avgConfidence
 
             finalReading = reading
             if (liveMode) {
                 currentState = ReaderState.PATROL
+                lastLiveDigits = overlayDigits
+                lastLiveReading = reading.takeIf { it != "ilegible" }
+                lastLiveReadingConfidence = digitConfidence
+                lastLiveSeenAtMs = SystemClock.elapsedRealtime()
                 runOnUiThread {
                     binding.overlayView.update(displayBox, overlayDigits, previewFrameWidth, previewFrameHeight)
                     updateUi(
                         state = ReaderState.PATROL,
                         reading = reading,
                         message = if (reading == "ilegible") {
-                            "Lectura en vivo: ilegible"
+                            "Lectura en vivo: ilegible${digitConfidence?.let { " (${formatPercent(it)} confianza)" } ?: ""}"
                         } else {
-                            "Lectura en vivo: $reading"
+                            "Lectura en vivo: $reading${digitConfidence?.let { " (${formatPercent(it)} confianza)" } ?: ""}"
                         }
                     )
                     showDecisionButtons(false)
@@ -807,6 +846,7 @@ class MainActivity : AppCompatActivity() {
         finalReading = null
         lastStableBox = null
         stableSinceMs = 0L
+        clearLiveCache()
         currentState = ReaderState.PATROL
         showDecisionButtons(false)
         binding.overlayView.clearAll()
@@ -834,6 +874,7 @@ class MainActivity : AppCompatActivity() {
         finalReading = null
         lastStableBox = null
         stableSinceMs = 0L
+        clearLiveCache()
         currentState = ReaderState.PATROL
         captureNextFrame.set(false)
         showDecisionButtons(false)
@@ -877,6 +918,23 @@ class MainActivity : AppCompatActivity() {
         }
         binding.tvResult.text = "Lectura: ${reading ?: "--"}"
         binding.tvHint.text = message
+    }
+
+    private fun formatPercent(value: Float): String {
+        return "${(value * 100f).toInt().coerceIn(0, 100)}%"
+    }
+
+    private fun shouldHoldLiveOverlay(now: Long): Boolean {
+        return (now - lastLiveSeenAtMs) <= LIVE_OVERLAY_HOLD_MS
+    }
+
+    private fun clearLiveCache() {
+        lastLiveDisplayBox = null
+        lastLiveDisplayConfidence = 0f
+        lastLiveDigits = emptyList()
+        lastLiveReading = null
+        lastLiveReadingConfidence = null
+        lastLiveSeenAtMs = 0L
     }
 
     override fun onDestroy() {
