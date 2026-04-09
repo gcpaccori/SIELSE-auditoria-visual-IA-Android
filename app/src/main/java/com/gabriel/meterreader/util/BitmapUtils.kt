@@ -45,20 +45,24 @@ object BitmapUtils {
         return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
     }
 
-    fun letterboxToSquare(source: Bitmap, size: Int): LetterboxResult {
+    fun letterbox(source: Bitmap, targetWidth: Int, targetHeight: Int): LetterboxResult {
         val srcW = source.width.toFloat()
         val srcH = source.height.toFloat()
-        val scale = minOf(size / srcW, size / srcH)
+        val safeWidth = targetWidth.coerceAtLeast(1)
+        val safeHeight = targetHeight.coerceAtLeast(1)
+        val scale = minOf(safeWidth / srcW, safeHeight / srcH)
         val dstW = (srcW * scale).toInt().coerceAtLeast(1)
         val dstH = (srcH * scale).toInt().coerceAtLeast(1)
-        val dx = ((size - dstW) / 2f)
-        val dy = ((size - dstH) / 2f)
+        val dx = ((safeWidth - dstW) / 2f)
+        val dy = ((safeHeight - dstH) / 2f)
 
-        val output = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val output = Bitmap.createBitmap(safeWidth, safeHeight, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
         canvas.drawColor(Color.DKGRAY)
         val dst = RectF(dx, dy, dx + dstW, dy + dstH)
         canvas.drawBitmap(source, null, dst, Paint(Paint.FILTER_BITMAP_FLAG))
         return LetterboxResult(output, scale, dx, dy)
     }
+
+    fun letterboxToSquare(source: Bitmap, size: Int): LetterboxResult = letterbox(source, size, size)
 }
