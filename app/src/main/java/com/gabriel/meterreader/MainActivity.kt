@@ -933,7 +933,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun formatPercent(value: Float): String {
-        return "${(value * 100f).toInt().coerceIn(0, 100)}%"
+        return "${(value.coerceIn(0f, 1f) * 100f).toInt()}%"
     }
 
     private fun shouldHoldLiveOverlay(now: Long): Boolean {
