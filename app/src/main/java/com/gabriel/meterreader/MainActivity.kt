@@ -393,11 +393,15 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            val candidate = buildBestCandidate(
-                crop = crop,
-                cropBounds = cropBounds,
-                digitModel = digitModel
-            )
+            val candidate = try {
+                buildBestCandidate(
+                    crop = crop,
+                    cropBounds = cropBounds,
+                    digitModel = digitModel
+                )
+            } finally {
+                if (!crop.isRecycled) crop.recycle()
+            }
 
             Log.d(TAG, "processFinalReading: candidate=${candidate?.reading} digits=${candidate?.count}")
 
@@ -483,7 +487,6 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         } finally {
-            if (!crop.isRecycled) crop.recycle()
             if (!lb.bitmap.isRecycled) lb.bitmap.recycle()
         }
     }
