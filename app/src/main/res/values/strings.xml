@@ -13,6 +13,6 @@
     <string name="mode_live">🎥 En vivo</string>
     <string name="mode_photo">📷 Foto</string>
     <string name="capture">Capturar</string>
-    <string name="detector_display">🔲 Detección completa</string>
-    <string name="detector_digits_only">🔢 Solo números (rápido)</string>
+    <string name="detector_display">🔲 Display + números</string>
+    <string name="detector_digits_only">🔢 Números en pantalla completa</string>
 </resources>

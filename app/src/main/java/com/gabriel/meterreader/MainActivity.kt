@@ -46,6 +46,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
 
@@ -89,8 +90,8 @@ class MainActivity : AppCompatActivity() {
         /** Fast live scanning for field usage; tune on target hardware if needed. */
         private const val PATROL_INTERVAL_MS = 120L
         private const val LIVE_DIGIT_INTERVAL_MS = 180L
-        /** In digits-only mode we assume the meter display is centered and almost full width. */
-        private const val CENTRAL_ROI_WIDTH_RATIO = 0.92f
+        private const val MAX_DISPLAY_INFERENCE_EDGE = 640
+        private const val MAX_DIGIT_INFERENCE_EDGE = 512
         private const val DIGIT_ONLY_SYNTHETIC_CONFIDENCE = 1f
         private const val LIVE_OVERLAY_HOLD_MS = 900L
         private const val MAX_CAPTURE_EDGE = 1600
@@ -255,15 +256,20 @@ class MainActivity : AppCompatActivity() {
             previewFrameHeight = bitmap.height
             try {
                 val (displayBox, displayConfidence) = if (isDigitOnlyMode) {
-                    buildCentralDisplayBox(bitmap.width, bitmap.height) to DIGIT_ONLY_SYNTHETIC_CONFIDENCE
+                    RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat()) to DIGIT_ONLY_SYNTHETIC_CONFIDENCE
                 } else {
                     val displayModel = displayDetector ?: run {
                         isProcessing.set(false)
                         return
                     }
+                    val displaySize = capInferenceSize(
+                        width = bitmap.width,
+                        height = bitmap.height,
+                        maxEdge = MAX_DISPLAY_INFERENCE_EDGE
+                    )
                     val (displayInputW, displayInputH) = displayModel.resolveInputSize(
-                        defaultWidth = bitmap.width,
-                        defaultHeight = bitmap.height
+                        defaultWidth = displaySize.first,
+                        defaultHeight = displaySize.second
                     )
                     val displayInput = BitmapUtils.letterbox(
                         source = bitmap,
@@ -297,6 +303,15 @@ class MainActivity : AppCompatActivity() {
                     displayBox == null -> {
                         lastStableBox = null
                         stableSinceMs = 0L
+                        val capturesSaved = if (isPhotoMode) {
+                            savePhotoPair(
+                                frameBitmap = bitmap,
+                                displayBox = RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat()),
+                                digits = emptyList()
+                            )
+                        } else {
+                            false
+                        }
                         val canHoldOverlay = !isPhotoMode &&
                             shouldHoldLiveOverlay(now)
                         val cachedDisplayBox = lastLiveDisplayBox?.let { RectF(it) }
@@ -307,7 +322,7 @@ class MainActivity : AppCompatActivity() {
                                     digitConfidence = lastLiveReadingConfidence
                                 )
                                 binding.overlayView.update(
-                                    cachedDisplayBox,
+                                    overlayDisplayBox(cachedDisplayBox),
                                     lastLiveDigits,
                                     previewFrameWidth,
                                     previewFrameHeight
@@ -323,7 +338,11 @@ class MainActivity : AppCompatActivity() {
                                     state = ReaderState.PATROL,
                                     reading = null,
                                     message = if (isPhotoMode) {
-                                        "No se detectó display. Presiona Capturar de nuevo."
+                                        if (capturesSaved) {
+                                            "No se detectó display. Captura guardada; ajusta y vuelve a intentar."
+                                        } else {
+                                            "No se detectó display. Presiona Capturar de nuevo."
+                                        }
                                     } else {
                                         "Buscando display..."
                                     }
@@ -344,7 +363,7 @@ class MainActivity : AppCompatActivity() {
                                 reading = null,
                                 message = "Display detectado. Reconociendo dígitos..."
                             )
-                            binding.overlayView.update(displayBox, emptyList(), previewFrameWidth, previewFrameHeight)
+                            binding.overlayView.update(overlayDisplayBox(displayBox), emptyList(), previewFrameWidth, previewFrameHeight)
                         }
                         processFinalReading(bitmap, displayBox, liveMode = false)
                         isProcessing.set(false)
@@ -361,7 +380,7 @@ class MainActivity : AppCompatActivity() {
                                 reading = lastLiveReading,
                                 message = "Reconociendo en vivo... ($confidenceSummary)"
                             )
-                            binding.overlayView.update(displayBox, lastLiveDigits, previewFrameWidth, previewFrameHeight)
+                            binding.overlayView.update(overlayDisplayBox(displayBox), lastLiveDigits, previewFrameWidth, previewFrameHeight)
                         }
                         processFinalReading(bitmap, displayBox, liveMode = true)
                         lastLiveDigitsInferenceAt = now
@@ -374,12 +393,12 @@ class MainActivity : AppCompatActivity() {
                             digitConfidence = lastLiveReadingConfidence
                         )
                         runOnUiThread {
-                            binding.overlayView.update(displayBox, lastLiveDigits, previewFrameWidth, previewFrameHeight)
+                            binding.overlayView.update(overlayDisplayBox(displayBox), lastLiveDigits, previewFrameWidth, previewFrameHeight)
                             updateUi(
                                 state = ReaderState.LOCKING,
                                 reading = lastLiveReading,
                                 message = if (isDigitOnlyMode) {
-                                    "ROI central activo. Ajusta ángulo/distancia..."
+                                    "Números en toda la pantalla. Ajusta ángulo/distancia..."
                                 } else {
                                     "Display $confidenceSummary."
                                 }
@@ -424,7 +443,7 @@ class MainActivity : AppCompatActivity() {
             if (crop.width <= 1 || crop.height <= 1) {
                 if (liveMode) {
                     runOnUiThread {
-                        binding.overlayView.update(displayBox, emptyList(), previewFrameWidth, previewFrameHeight)
+                        binding.overlayView.update(overlayDisplayBox(displayBox), emptyList(), previewFrameWidth, previewFrameHeight)
                         updateUi(
                             state = ReaderState.PATROL,
                             reading = "ilegible",
@@ -462,7 +481,7 @@ class MainActivity : AppCompatActivity() {
                 lastLiveReadingConfidence = digitConfidence
                 lastLiveSeenAtMs = SystemClock.elapsedRealtime()
                 runOnUiThread {
-                    binding.overlayView.update(displayBox, overlayDigits, previewFrameWidth, previewFrameHeight)
+                    binding.overlayView.update(overlayDisplayBox(displayBox), overlayDigits, previewFrameWidth, previewFrameHeight)
                     val confidenceSuffix = confidenceSuffix(digitConfidence)
                     updateUi(
                         state = ReaderState.PATROL,
@@ -479,7 +498,7 @@ class MainActivity : AppCompatActivity() {
                 currentState = ReaderState.READY
                 val capturesSaved = savePhotoPair(frameBitmap, displayBox, overlayDigits)
                 runOnUiThread {
-                    binding.overlayView.update(displayBox, overlayDigits, previewFrameWidth, previewFrameHeight)
+                    binding.overlayView.update(overlayDisplayBox(displayBox), overlayDigits, previewFrameWidth, previewFrameHeight)
                     updateUi(
                         state = ReaderState.READY,
                         reading = reading,
@@ -516,9 +535,14 @@ class MainActivity : AppCompatActivity() {
         digitModel: OnnxYoloDetector
     ): CandidateResult? {
         Log.d(TAG, "buildBestCandidate: crop ${crop.width}×${crop.height}, running digit model")
+        val digitSize = capInferenceSize(
+            width = crop.width,
+            height = crop.height,
+            maxEdge = MAX_DIGIT_INFERENCE_EDGE
+        )
         val (digitInputW, digitInputH) = digitModel.resolveInputSize(
-            defaultWidth = crop.width,
-            defaultHeight = crop.height
+            defaultWidth = digitSize.first,
+            defaultHeight = digitSize.second
         )
         val lb = BitmapUtils.letterbox(
             source = crop,
@@ -581,7 +605,7 @@ class MainActivity : AppCompatActivity() {
         finalReading = "ilegible"
         currentState = ReaderState.READY
         runOnUiThread {
-            binding.overlayView.update(displayBox, emptyList(), previewFrameWidth, previewFrameHeight)
+            binding.overlayView.update(overlayDisplayBox(displayBox), emptyList(), previewFrameWidth, previewFrameHeight)
             updateUi(
                 state = ReaderState.READY,
                 reading = "ilegible",
@@ -671,17 +695,17 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun buildCentralDisplayBox(frameW: Int, frameH: Int): RectF {
-        val width = frameW * CENTRAL_ROI_WIDTH_RATIO
-        val height = width / DISPLAY_ASPECT_RATIO
-        val cx = frameW / 2f
-        val cy = frameH / 2f
-        return RectF(
-            cx - width / 2f,
-            cy - height / 2f,
-            cx + width / 2f,
-            cy + height / 2f
-        )
+    private fun overlayDisplayBox(displayBox: RectF?): RectF? {
+        return if (isDigitOnlyMode) null else displayBox
+    }
+
+    private fun capInferenceSize(width: Int, height: Int, maxEdge: Int): Pair<Int, Int> {
+        val maxCurrent = maxOf(width, height).coerceAtLeast(1)
+        if (maxCurrent <= maxEdge) return width.coerceAtLeast(1) to height.coerceAtLeast(1)
+        val scale = maxEdge / maxCurrent.toFloat()
+        val targetW = (width * scale).roundToInt().coerceAtLeast(1)
+        val targetH = (height * scale).roundToInt().coerceAtLeast(1)
+        return targetW to targetH
     }
 
     private fun savePhotoPair(frameBitmap: Bitmap, displayBox: RectF, digits: List<Detection>): Boolean {
@@ -826,7 +850,7 @@ class MainActivity : AppCompatActivity() {
                 state = ReaderState.PATROL,
                 reading = null,
                 message = if (isDigitOnlyMode) {
-                    "Modo rápido: reconocimiento de números en ROI central."
+                    "Modo rápido: reconocimiento de números en toda la pantalla."
                 } else {
                     "Modo estándar: detección de display + números."
                 }
